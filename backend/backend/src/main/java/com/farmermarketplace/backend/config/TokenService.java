@@ -1,0 +1,108 @@
+package com.farmermarketplace.backend.config;
+
+import jakarta.annotation.PostConstruct;
+import org.springframework.stereotype.Component;
+import org.springframework.beans.factory.annotation.Value;
+
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+
+/**
+ * Lightweight stateless token service using HMAC-SHA256.
+ * No external JWT library required — uses only Java standard library.
+ *
+ * Token format:  base64(userId:role:expiry) + "." + base64(hmac)
+ */
+@Component
+public class TokenService {
+
+    @Value("${app.token.secret:}")
+    private String secret;
+
+    private static final long TOKEN_VALIDITY_MS = 24 * 60 * 60 * 1000L; // 24 hours
+
+    @PostConstruct
+    public void validateSecret() {
+        if (secret == null || secret.trim().isEmpty()) {
+            throw new IllegalStateException(
+                "CRITICAL SECURITY CONFIGURATION ERROR: 'app.token.secret' (or environment variable 'APP_TOKEN_SECRET') " +
+                "is missing or empty. The application cannot start without a valid token secret."
+            );
+        }
+    }
+
+    public String generateToken(Long userId, String role) {
+        long expiry = System.currentTimeMillis() + TOKEN_VALIDITY_MS;
+        String payload = userId + ":" + role + ":" + expiry;
+        String payloadB64 = Base64.getEncoder().encodeToString(payload.getBytes(StandardCharsets.UTF_8));
+        String sig = hmac(payloadB64);
+        return payloadB64 + "." + sig;
+    }
+
+    /**
+     * Validates token and returns the role if valid, null otherwise.
+     */
+    public String validateAndGetRole(String token) {
+        if (token == null || !token.contains(".")) return null;
+        int dot = token.lastIndexOf('.');
+        String payloadB64 = token.substring(0, dot);
+        String sig = token.substring(dot + 1);
+
+        // Verify signature
+        if (!hmac(payloadB64).equals(sig)) return null;
+
+        // Decode payload
+        String payload;
+        try {
+            payload = new String(Base64.getDecoder().decode(payloadB64), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return null;
+        }
+
+        String[] parts = payload.split(":");
+        if (parts.length != 3) return null;
+
+        long expiry;
+        try {
+            expiry = Long.parseLong(parts[2]);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+
+        if (System.currentTimeMillis() > expiry) return null; // expired
+
+        return parts[1]; // role
+    }
+
+    public Long validateAndGetUserId(String token) {
+        if (token == null || !token.contains(".")) return null;
+        int dot = token.lastIndexOf('.');
+        String payloadB64 = token.substring(0, dot);
+        String sig = token.substring(dot + 1);
+        if (!hmac(payloadB64).equals(sig)) return null;
+        try {
+            String payload = new String(Base64.getDecoder().decode(payloadB64), StandardCharsets.UTF_8);
+            String[] parts = payload.split(":");
+            if (parts.length != 3) return null;
+            long expiry = Long.parseLong(parts[2]);
+            if (System.currentTimeMillis() > expiry) return null;
+            return Long.parseLong(parts[0]);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private String hmac(String data) {
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            SecretKeySpec keySpec = new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256");
+            mac.init(keySpec);
+            byte[] raw = mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
+            return Base64.getEncoder().encodeToString(raw);
+        } catch (Exception e) {
+            throw new RuntimeException("HMAC error", e);
+        }
+    }
+}
